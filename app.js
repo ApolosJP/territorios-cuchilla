@@ -83,7 +83,7 @@ const diasCiclo = c => diasEntre(c.inicio, c.fin || hoy()) + 1; // inicio y cier
 
 /* ================= Backend ================= */
 const Demo = {
-  db() { try { return JSON.parse(LS.getItem('territorio_demo')) || { visitas: [], ciclos: [], notas: [] }; } catch { return { visitas: [], ciclos: [], notas: [] }; } },
+  db() { let d; try { d = JSON.parse(LS.getItem('territorio_demo')); } catch { d = null; } d = d || { visitas: [], ciclos: [], notas: [] }; d.programas = d.programas || []; return d; },
   save(d) { LS.setItem('territorio_demo', JSON.stringify(d)); },
   id() { return Math.random().toString(16).slice(2, 10); },
   call(action, p) {
@@ -103,6 +103,11 @@ const Demo = {
         else { out = [{ ...p.row, id: this.id() }]; d.notas.push(out[0]); }
         break;
       case 'deleteNota': d.notas = d.notas.filter(n => n.id !== p.id); out = { borrado: true }; break;
+      case 'getProg': out = d.programas; break;
+      case 'saveProg': {
+        const row = { tipo: p.tipo, datos: p.datos, actualizado: new Date().toISOString() };
+        d.programas = d.programas.filter(x => x.tipo !== p.tipo).concat([row]); out = row; break;
+      }
     }
     this.save(d); return Promise.resolve(JSON.parse(JSON.stringify(out)));
   }
@@ -154,6 +159,7 @@ async function cargar() {
   try {
     const d = await api('getAll');
     S.visitas = d.visitas || []; S.ciclos = d.ciclos || []; S.notas = d.notas || [];
+    aplicarProgramas(d.programas);
     await migrarNotas();
   } catch (e) { toast(e.message, 5000); }
   document.body.classList.remove('loading');
@@ -174,13 +180,40 @@ function renderHeader() {
 function martesDe(f) { const d = parseF(f), w = d.getDay(); return sumarDias(f, w === 0 ? 2 : w === 1 ? 1 : 2 - w); } // martes de esa semana (lunes y domingo → martes siguiente)
 function domingoDe(f) { const w = parseF(f).getDay(); return sumarDias(f, (7 - w) % 7); }
 function progVacio(tipo, fecha) {
-  if (tipo === 'semanal') return { martes: martesDe(fecha || hoy()), filas: PROG.semanal.filas.map(r => ({ k: r.k, hora: r.h, encuentro: '', capitan: '', mz: [], publica: false, estado: '' })) };
-  return { fecha: domingoDe(fecha || hoy()), capitan: '', filas: PROG.domingo.filas.map(r => ({ k: r.k, hora: r.h, encuentro: '', mz: [], publica: false, estado: '' })) };
+  if (tipo === 'semanal') return { martes: martesDe(fecha || hoy()), nota: '', filas: PROG.semanal.filas.map(r => ({ k: r.k, hora: r.h, encuentro: '', capitan: '', mz: [], publica: false, estado: '' })) };
+  return { fecha: domingoDe(fecha || hoy()), capitan: '', nota: '', filas: PROG.domingo.filas.map(r => ({ k: r.k, hora: r.h, encuentro: '', mz: [], publica: false, estado: '' })) };
 }
 let P;
 try { P = JSON.parse(LS.getItem('territorio_prog')); } catch { P = null; }
 if (!P || !P.semanal || !P.domingo) P = { semanal: progVacio('semanal'), domingo: progVacio('domingo') };
-const guardarProg = () => LS.setItem('territorio_prog', JSON.stringify(P));
+// El programa se guarda en Google Sheets (hoja "programas") para verlo y editarlo desde cualquier dispositivo.
+let tGuardar = null; const sucio = new Set();
+function estadoProg(txt) { const e = $('#progEstado'); if (e) e.textContent = txt; S.progEstado = txt; }
+function guardarProg(tipo) {
+  LS.setItem('territorio_prog', JSON.stringify(P));
+  (tipo ? [tipo] : ['semanal', 'domingo']).forEach(t => sucio.add(t));
+  estadoProg('Guardando…'); clearTimeout(tGuardar); tGuardar = setTimeout(subirProg, 700);
+}
+async function subirProg() {
+  const ts = [...sucio]; sucio.clear();
+  try { for (const t of ts) await api('saveProg', { tipo: t, datos: JSON.stringify(P[t]) }); estadoProg(DEMO ? '✓ Guardado (demo)' : '✓ Guardado en Google Sheets'); }
+  catch (e) { ts.forEach(t => sucio.add(t)); estadoProg('⚠ No se pudo guardar: ' + e.message); }
+}
+function aplicarProgramas(rows) {
+  (rows || []).forEach(r => {
+    if (!PROG[r.tipo] || sucio.has(r.tipo)) return;
+    let d; try { d = JSON.parse(r.datos); } catch { return; }
+    if (!d || !Array.isArray(d.filas)) return;
+    const base = progVacio(r.tipo, r.tipo === 'semanal' ? d.martes : d.fecha);
+    base.filas = base.filas.map(f => ({ ...f, ...(d.filas.find(x => x.k === f.k) || {}) }));
+    P[r.tipo] = { ...base, ...d, filas: base.filas };
+  });
+  LS.setItem('territorio_prog', JSON.stringify(P));
+}
+async function refrescarProg() {
+  if (sucio.size || !S.token) return;
+  try { aplicarProgramas(await api('getProg')); renderProg(); pintarBordes(); } catch (e) { /* sin conexión: se usa la copia local */ }
+}
 const filaDef = (tipo, k) => PROG[tipo].filas.find(r => r.k === k);
 const filaDe = (tipo, k) => P[tipo].filas.find(r => r.k === k);
 const fechaFila = (tipo, k) => tipo === 'semanal' ? sumarDias(P.semanal.martes, filaDef(tipo, k).off) : P.domingo.fecha;
@@ -308,7 +341,7 @@ function clicManzana(id, ev) {
     const { tipo, k } = S.asignar, fila = filaDe(tipo, k);
     if (fila.mz.includes(id)) fila.mz = fila.mz.filter(x => x !== id);
     else { P[tipo].filas.forEach(r => { r.mz = r.mz.filter(x => x !== id); }); fila.mz.push(id); fila.mz.sort(natural); fila.estado = ''; }
-    guardarProg(); pintarBordes(); renderAsigBar(); renderProg();
+    guardarProg(tipo); pintarBordes(); renderAsigBar(); renderProg();
     return;
   }
   const m = MZ_BY_ID[id], c = cicloActual();
@@ -607,17 +640,19 @@ function renderProg() {
       <label class="f" style="margin:0">${t === 'semanal' ? 'Martes de la semana' : 'Domingo'}<input type="date" id="progFecha" value="${t === 'semanal' ? pr.martes : pr.fecha}"></label>
     </div>
     <table class="prog ${t}"><thead><tr><th style="width:21%">Día</th><th style="width:24%">Punto de encuentro</th><th style="width:20%">Capitán</th><th>Territorio</th></tr></thead><tbody>${filas}</tbody></table>
+    <label class="f" for="progNota">Nota para ${t === 'semanal' ? 'la semana' : 'el domingo'} <small>(aparece al pie del programa en el PDF)</small></label>
+    <textarea id="progNota" data-campo="nota" placeholder="Ej. El jueves por la tarde nos reunimos 15 minutos antes.">${esc(pr.nota || '')}</textarea>
     <div class="pacts">
       <button class="btn pri" data-pdf="share">📤 Enviar por WhatsApp (PDF)</button>
       <button class="btn" data-pdf="descargar">⬇️ Descargar PDF</button>
       <button class="btn dan" id="progLimpiar" style="margin-left:auto">🧹 ${t === 'semanal' ? 'Nueva semana' : 'Nuevo domingo'}</button>
     </div>
-    <p class="hint">${t === 'semanal' ? 'El programa se guarda en este dispositivo. Los lunes usa “Nueva semana” para limpiarlo y empezar el siguiente.' : 'El programa se guarda en este dispositivo. Usa “Nuevo domingo” para limpiarlo y preparar el siguiente.'}</p>`;
+    <p class="hint"><span id="progEstado">${esc(S.progEstado || '')}</span> · ${t === 'semanal' ? 'El programa se guarda en Google Sheets y se puede editar desde cualquier dispositivo. Los lunes usa “Nueva semana” para limpiarlo y empezar el siguiente.' : 'El programa se guarda en Google Sheets y se puede editar desde cualquier dispositivo. Usa “Nuevo domingo” para limpiarlo y preparar el siguiente.'}</p>`;
   if (new Date().getDay() === 1 && t === 'semanal') $('#progLimpiar').classList.add('pulse');
 }
 
 function initProg() {
-  document.querySelectorAll('#progTabs button').forEach(b => b.onclick = () => { S.progTab = b.dataset.p; renderProg(); });
+  document.querySelectorAll('#progTabs button').forEach(b => b.onclick = () => { S.progTab = b.dataset.p; renderProg(); refrescarProg(); });
   const hoja = $('#progHoja');
   hoja.addEventListener('change', e => {
     const el = e.target, t = S.progTab;
@@ -625,34 +660,35 @@ function initProg() {
       if (!el.value) return;
       if (t === 'semanal') { P.semanal.martes = martesDe(el.value); if (P.semanal.martes !== el.value) toast('Se ajustó al martes de esa semana'); }
       else { P.domingo.fecha = domingoDe(el.value); if (P.domingo.fecha !== el.value) toast('Se ajustó al domingo siguiente'); }
-      guardarProg(); renderProg(); return;
+      guardarProg(t); renderProg(); return;
     }
     const campo = el.dataset.campo; if (!campo) return;
-    if (campo === 'capitanDom') { P.domingo.capitan = el.value.trim(); recordarNombre('capitanes', P.domingo.capitan); }
+    if (campo === 'nota') { P[t].nota = el.value.trim(); }
+    else if (campo === 'capitanDom') { P.domingo.capitan = el.value.trim(); recordarNombre('capitanes', P.domingo.capitan); }
     else {
       const r = filaDe(t, el.dataset.k); r[campo] = el.value.trim();
       if (campo === 'encuentro') recordarNombre('encuentros', r.encuentro);
       if (campo === 'capitan') recordarNombre('capitanes', r.capitan);
     }
-    guardarProg();
+    guardarProg(t);
   });
   hoja.addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return;
-    if (b.dataset.quitarprog) { const [t, k, id] = b.dataset.quitarprog.split('|'); const r = filaDe(t, k); r.mz = r.mz.filter(x => x !== id); guardarProg(); renderProg(); pintarBordes(); return; }
-    if (b.dataset.pubprog) { const [t, k] = b.dataset.pubprog.split('|'); const r = filaDe(t, k); r.publica = !r.publica; guardarProg(); renderProg(); return; }
+    if (b.dataset.quitarprog) { const [t, k, id] = b.dataset.quitarprog.split('|'); const r = filaDe(t, k); r.mz = r.mz.filter(x => x !== id); guardarProg(t); renderProg(); pintarBordes(); return; }
+    if (b.dataset.pubprog) { const [t, k] = b.dataset.pubprog.split('|'); const r = filaDe(t, k); r.publica = !r.publica; guardarProg(t); renderProg(); return; }
     if (b.dataset.asigprog) { const [t, k] = b.dataset.asigprog.split('|'); ir('mapa'); setAsignar({ tipo: t, k }); return; }
     if (b.dataset.visprog) {
       const [t, k] = b.dataset.visprog.split('|'), r = filaDe(t, k), d = filaDef(t, k), f = fechaFila(t, k);
       if (f > hoy() && !confirm(`${d.d} (${fmtF(f)}) todavía no llega. ¿Registrar las manzanas como visitadas de todos modos?`)) return;
       if (!confirm(`¿Registrar ${r.mz.length} manzana(s) como visitadas el ${fmtF(f)}?\n${r.mz.join(', ')}`)) return;
       const quien = t === 'semanal' ? r.capitan : P.domingo.capitan;
-      if (await registrar(f, r.mz.slice(), quien, `${PROG[t].titulo} · ${d.d}`)) { r.estado = 'visitadas'; guardarProg(); renderProg(); }
+      if (await registrar(f, r.mz.slice(), quien, `${PROG[t].titulo} · ${d.d}`)) { r.estado = 'visitadas'; guardarProg(t); renderProg(); }
       return;
     }
     if (b.dataset.novisprog) {
       const [t, k] = b.dataset.novisprog.split('|'), r = filaDe(t, k);
       if (!confirm(`¿Marcar como NO visitadas? Se quitarán ${r.mz.join(', ')} de ${filaDef(t, k).d} para que puedas asignarlas otro día.`)) return;
-      r.mz = []; r.estado = ''; guardarProg(); renderProg(); pintarBordes(); toast('Manzanas liberadas para asignarse otro día');
+      r.mz = []; r.estado = ''; guardarProg(t); renderProg(); pintarBordes(); toast('Manzanas liberadas para asignarse otro día');
       return;
     }
     if (b.id === 'progLimpiar') {
@@ -660,7 +696,7 @@ function initProg() {
       if (!confirm(t === 'semanal' ? '¿Limpiar el programa y preparar la nueva semana? Se borrarán puntos de encuentro, capitanes y territorios.' : '¿Limpiar el programa y preparar el siguiente domingo?')) return;
       const d = parseF(hoy()), w = d.getDay();
       P[t] = t === 'semanal' ? progVacio('semanal', sumarDias(hoy(), w === 1 ? 1 : (2 - w + 7) % 7)) : progVacio('domingo', sumarDias(hoy(), w === 0 ? 7 : 0));
-      guardarProg(); renderProg(); pintarBordes(); toast('Programa listo para llenarse');
+      guardarProg(t); renderProg(); pintarBordes(); toast('Programa listo para llenarse');
       return;
     }
     if (b.dataset.pdf) { await enviarPDF(S.progTab, b.dataset.pdf); }
@@ -668,16 +704,16 @@ function initProg() {
 }
 
 /* ================= PDF ================= */
-function notasDe(tipo) { const asig = asignadas(tipo); return S.notas.filter(n => asig.has(n.manzana)).sort((a, b) => natural(a.manzana, b.manzana) || a.codigo.localeCompare(b.codigo, 'es', { numeric: true })); }
+function notasDe(ids) { const set = new Set(ids); return S.notas.filter(n => set.has(n.manzana)).sort((a, b) => natural(a.manzana, b.manzana) || a.codigo.localeCompare(b.codigo, 'es', { numeric: true })); }
 
-function mapaCanvas(tipo) {
-  const asig = asignadas(tipo), ns = notasDe(tipo);
+function mapaCanvas(tipo, ids) {
+  const todas = asignadas(tipo), asig = new Map(ids.map(id => [id, todas.get(id)])), ns = notasDe(ids);
   // encuadre: manzanas asignadas con margen; si no hay, toda la colonia
   let pts = [];
   (asig.size ? [...asig.keys()] : MZ.map(m => m.id)).forEach(id => pts.push(...MZ_BY_ID[id].ring));
   let x0 = Math.min(...pts.map(p => p[0])), x1 = Math.max(...pts.map(p => p[0])), y0 = Math.min(...pts.map(p => p[1])), y1 = Math.max(...pts.map(p => p[1]));
   const pad = Math.max(40, 0.12 * Math.max(x1 - x0, y1 - y0)); x0 -= pad; x1 += pad; y0 -= pad; y1 += pad;
-  const W = 1800, Hmax = 1150; let s = W / (x1 - x0); let H = (y1 - y0) * s;
+  const W = 1800, Hmax = 1500; let s = W / (x1 - x0); let H = (y1 - y0) * s;
   if (H > Hmax) { s = Hmax / (y1 - y0); H = Hmax; }
   const ox = (W - (x1 - x0) * s) / 2;
   const cv = document.createElement('canvas'); cv.width = W; cv.height = Math.round(H);
@@ -708,9 +744,10 @@ function mapaCanvas(tipo) {
   // notas
   ns.forEach(n => {
     const [x, y] = P2(xy([+n.lng, +n.lat])); const col = n.tipo === 'casa' ? '#c62f2f' : '#2a78d6';
-    g.font = '700 22px system-ui, sans-serif'; const tw = g.measureText(n.codigo).width + 18;
+    const nf = Math.max(22, Math.min(44, 10 * s)), hh = nf * 1.45;
+    g.font = `700 ${nf}px system-ui, sans-serif`; const tw = g.measureText(n.codigo).width + nf * .8;
     g.fillStyle = '#fff'; g.strokeStyle = col; g.lineWidth = 4;
-    g.beginPath(); g.roundRect ? g.roundRect(x - tw / 2, y - 16, tw, 32, 16) : g.rect(x - tw / 2, y - 16, tw, 32); g.fill(); g.stroke();
+    g.beginPath(); g.roundRect ? g.roundRect(x - tw / 2, y - hh / 2, tw, hh, hh / 2) : g.rect(x - tw / 2, y - hh / 2, tw, hh); g.fill(); g.stroke();
     g.fillStyle = col; g.fillText(n.codigo, x, y + 1);
   });
   return { url: cv.toDataURL('image/png'), w: W, h: H };
@@ -734,36 +771,56 @@ async function construirPDF(tipo) {
   });
   doc.autoTable({
     startY: 38, margin: { left: M, right: M }, head: [['Día', 'Punto de encuentro', 'Capitán', 'Territorio']], body,
-    theme: 'grid', styles: { fontSize: 11, cellPadding: 3.2, valign: 'middle', lineColor: [120, 120, 120], lineWidth: .25, minCellHeight: tipo === 'semanal' ? 26 : 40, textColor: [20, 20, 20] },
-    headStyles: { fillColor: [40, 40, 40], textColor: 255, fontStyle: 'bold', halign: 'center', minCellHeight: 10 },
+    theme: 'grid', styles: { fontSize: 11, cellPadding: 3.2, valign: 'middle', lineColor: [120, 120, 120], lineWidth: .25, minCellHeight: tipo === 'semanal' ? 25 : 38, textColor: [20, 20, 20] },
+    headStyles: { fillColor: [217, 217, 217], textColor: [30, 30, 30], fontStyle: 'bold', halign: 'center', minCellHeight: 10 },
     columnStyles: { 0: { cellWidth: 38 }, 1: { cellWidth: 50 }, 2: { cellWidth: 40 } },
     didDrawCell: dc => { if (dc.section === 'body' && dc.column.index === 0) { const c = cfg.filas[dc.row.index].c; doc.setFillColor(c); doc.rect(dc.cell.x, dc.cell.y, 2.2, dc.cell.height, 'F'); } }
   });
-  doc.setFontSize(8.5); doc.setTextColor(120); doc.text(`Generado el ${fmtF(hoy())} · Las notas y el mapa de los territorios asignados están en la hoja 2.`, M, doc.internal.pageSize.getHeight() - 10); doc.setTextColor(0);
+  // nota del programa al pie
+  const H = doc.internal.pageSize.getHeight();
+  if (pr.nota) {
+    let y0 = doc.lastAutoTable.finalY + 8;
+    doc.setFontSize(11); const lineas = doc.splitTextToSize(pr.nota, W - 2 * M - 8);
+    const alto = 9 + lineas.length * 5;
+    if (y0 + alto > H - 16) { doc.addPage(); y0 = 20; }
+    doc.setDrawColor(150); doc.setFillColor(247, 247, 245); doc.roundedRect(M, y0, W - 2 * M, alto, 2, 2, 'FD');
+    doc.setFont('helvetica', 'bold'); doc.text('Nota:', M + 4, y0 + 6.5);
+    doc.setFont('helvetica', 'normal'); doc.text(lineas, M + 4, y0 + 12);
+  }
+  const dias = cfg.filas.filter(d => filaDe(tipo, d.k).mz.length);
+  doc.setPage(1); doc.setFontSize(8.5); doc.setTextColor(120);
+  doc.text(`Generado el ${fmtF(hoy())}${dias.length ? ' · En las hojas siguientes: mapa, casas marcadas y notas de cada día.' : ''}`, M, H - 10); doc.setTextColor(0);
+  doc.setPage(doc.getNumberOfPages());
 
-  // ---- Hoja 2: mapa pequeño + notas
-  doc.addPage();
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.text('Territorios asignados: mapa y notas', M, 18);
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.text(`${cfg.titulo} · ${subtituloProg(tipo)}`, M, 24);
-  const img = mapaCanvas(tipo), iw = W - 2 * M, ih = Math.min(115, iw * img.h / img.w), iw2 = ih * img.w / img.h;
-  doc.addImage(img.url, 'PNG', M + (iw - iw2) / 2, 28, iw2, ih); doc.setDrawColor(180); doc.rect(M + (iw - iw2) / 2, 28, iw2, ih);
-  let y = 28 + ih + 6, x = M; doc.setFontSize(9);
-  cfg.filas.forEach(d => { const r = filaDe(tipo, d.k); if (!r.mz.length) return; const t = `${d.d}: ${r.mz.join(', ')}`; const w = doc.getTextWidth(t) + 9; if (x + w > W - M) { x = M; y += 5.5; } doc.setFillColor(d.c); doc.rect(x, y - 3, 3.5, 3.5, 'F'); doc.text(t, x + 5, y); x += w; });
-  y += 7;
-  const casas = notasDe(tipo).filter(n => n.tipo === 'casa'), notas = notasDe(tipo).filter(n => n.tipo === 'nota');
-  const tabla = (titulo, head, rows, widths) => {
-    if (y > 250) { doc.addPage(); y = 18; }
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text(titulo, M, y); doc.setFont('helvetica', 'normal');
-    doc.autoTable({ startY: y + 2.5, margin: { left: M, right: M, top: 16 }, head: [head], body: rows, theme: 'grid', styles: { fontSize: 8.5, cellPadding: 1.8, valign: 'top', lineColor: [170, 170, 170], lineWidth: .2 }, headStyles: { fillColor: [235, 235, 235], textColor: 20, fontStyle: 'bold' }, columnStyles: widths });
-    y = doc.lastAutoTable.finalY + 8;
-  };
-  if (!casas.length && !notas.length) { doc.setFontSize(11); doc.text('No hay casas marcadas ni notas en las manzanas asignadas.', M, y); }
-  if (casas.length) tabla(`Casas marcadas (${casas.length})`, ['Código', 'Manzana', 'Dirección', 'Casa y referencias', 'Habitante y lo que dijo', 'Nota', 'Autor'],
-    casas.map(n => [n.codigo, n.manzana, n.direccion, [n.casa, n.referencias && 'Ref.: ' + n.referencias].filter(Boolean).join('\n'), [n.habitante, n.dijo && 'Dijo: ' + n.dijo].filter(Boolean).join('\n'), n.texto, n.autor]),
-    { 0: { cellWidth: 14, fontStyle: 'bold' }, 1: { cellWidth: 16 }, 2: { cellWidth: 30 }, 3: { cellWidth: 38 }, 4: { cellWidth: 40 }, 5: { cellWidth: 29 }, 6: { cellWidth: 20.9 } });
-  if (notas.length) tabla(`Notas (${notas.length})`, ['Código', 'Manzana', 'Dirección o referencia', 'Nota', 'Autor'],
-    notas.map(n => [n.codigo, n.manzana, n.direccion, n.texto, n.autor]),
-    { 0: { cellWidth: 14, fontStyle: 'bold' }, 1: { cellWidth: 16 }, 2: { cellWidth: 45 }, 3: { cellWidth: 92.9 }, 4: { cellWidth: 20 } });
+  // ---- Hojas siguientes: un mini mapa por día con sus casas marcadas y notas
+  dias.forEach(d => {
+    const r = filaDe(tipo, d.k), f = fechaFila(tipo, d.k);
+    doc.addPage();
+    doc.setFillColor(d.c); doc.rect(M, 12, 3, 13, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(15);
+    doc.text(`${d.d}${tipo === 'semanal' ? ' ' + fmtCorta(f) : ''} · ${hora(r.hora)}`, M + 6, 17.5);
+    doc.setFontSize(11); doc.text(`Territorio: ${r.mz.join(', ')}${r.publica ? '  ·  Predicación pública' : ''}`, M + 6, 23.5);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(90);
+    const cap = tipo === 'semanal' ? r.capitan : pr.capitan;
+    doc.text([r.encuentro && 'Punto de encuentro: ' + r.encuentro, cap && 'Capitán: ' + cap].filter(Boolean).join('   ·   ') || ' ', M + 6, 29); doc.setTextColor(0);
+    const img = mapaCanvas(tipo, r.mz), iw = W - 2 * M, ih = Math.min(120, iw * img.h / img.w), iw2 = ih * img.w / img.h;
+    doc.addImage(img.url, 'PNG', M + (iw - iw2) / 2, 33, iw2, ih); doc.setDrawColor(180); doc.rect(M + (iw - iw2) / 2, 33, iw2, ih);
+    let y = 33 + ih + 8;
+    const ns = notasDe(r.mz), casas = ns.filter(n => n.tipo === 'casa'), notas = ns.filter(n => n.tipo === 'nota');
+    const tabla = (titulo, head, rows, widths) => {
+      if (y > H - 40) { doc.addPage(); y = 18; }
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text(titulo, M, y); doc.setFont('helvetica', 'normal');
+      doc.autoTable({ startY: y + 2.5, margin: { left: M, right: M, top: 16 }, head: [head], body: rows, theme: 'grid', styles: { fontSize: 8.5, cellPadding: 1.8, valign: 'top', lineColor: [170, 170, 170], lineWidth: .2 }, headStyles: { fillColor: [217, 217, 217], textColor: [30, 30, 30], fontStyle: 'bold' }, columnStyles: widths });
+      y = doc.lastAutoTable.finalY + 8;
+    };
+    if (!ns.length) { doc.setFontSize(10.5); doc.setTextColor(90); doc.text('Sin casas marcadas ni notas en estas manzanas.', M, y); doc.setTextColor(0); }
+    if (casas.length) tabla(`Casas marcadas (${casas.length})`, ['Código', 'Manzana', 'Dirección', 'Casa y referencias', 'Habitante y lo que dijo', 'Nota', 'Autor'],
+      casas.map(n => [n.codigo, n.manzana, n.direccion, [n.casa, n.referencias && 'Ref.: ' + n.referencias].filter(Boolean).join('\n'), [n.habitante, n.dijo && 'Dijo: ' + n.dijo].filter(Boolean).join('\n'), n.texto, n.autor]),
+      { 0: { cellWidth: 14, fontStyle: 'bold' }, 1: { cellWidth: 16 }, 2: { cellWidth: 30 }, 3: { cellWidth: 38 }, 4: { cellWidth: 40 }, 5: { cellWidth: 29 }, 6: { cellWidth: 20.9 } });
+    if (notas.length) tabla(`Notas (${notas.length})`, ['Código', 'Manzana', 'Dirección o referencia', 'Nota', 'Autor'],
+      notas.map(n => [n.codigo, n.manzana, n.direccion, n.texto, n.autor]),
+      { 0: { cellWidth: 14, fontStyle: 'bold' }, 1: { cellWidth: 16 }, 2: { cellWidth: 45 }, 3: { cellWidth: 92.9 }, 4: { cellWidth: 20 } });
+  });
   const total = doc.getNumberOfPages();
   for (let i = 1; i <= total; i++) { doc.setPage(i); doc.setFontSize(8.5); doc.setTextColor(120); doc.text(`Hoja ${i} de ${total}`, W - M, doc.internal.pageSize.getHeight() - 10, { align: 'right' }); doc.setTextColor(0); }
   return doc;
@@ -911,7 +968,7 @@ function ir(v) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
   if (v === 'mapa') setTimeout(() => map.invalidateSize(), 50);
   if (v === 'registro') renderRegistro();
-  if (v === 'prog') renderProg();
+  if (v === 'prog') { renderProg(); refrescarProg(); }
 }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => ir(b.dataset.v));
 
