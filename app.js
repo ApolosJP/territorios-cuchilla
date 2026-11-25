@@ -174,8 +174,8 @@ function renderHeader() {
 function martesDe(f) { const d = parseF(f), w = d.getDay(); return sumarDias(f, w === 0 ? 2 : w === 1 ? 1 : 2 - w); } // martes de esa semana (lunes y domingo → martes siguiente)
 function domingoDe(f) { const w = parseF(f).getDay(); return sumarDias(f, (7 - w) % 7); }
 function progVacio(tipo, fecha) {
-  if (tipo === 'semanal') return { martes: martesDe(fecha || hoy()), filas: PROG.semanal.filas.map(r => ({ k: r.k, hora: r.h, encuentro: '', capitan: '', mz: [], estado: '' })) };
-  return { fecha: domingoDe(fecha || hoy()), capitan: '', filas: PROG.domingo.filas.map(r => ({ k: r.k, hora: r.h, encuentro: '', mz: [], estado: '' })) };
+  if (tipo === 'semanal') return { martes: martesDe(fecha || hoy()), filas: PROG.semanal.filas.map(r => ({ k: r.k, hora: r.h, encuentro: '', capitan: '', mz: [], publica: false, estado: '' })) };
+  return { fecha: domingoDe(fecha || hoy()), capitan: '', filas: PROG.domingo.filas.map(r => ({ k: r.k, hora: r.h, encuentro: '', mz: [], publica: false, estado: '' })) };
 }
 let P;
 try { P = JSON.parse(LS.getItem('territorio_prog')); } catch { P = null; }
@@ -592,9 +592,10 @@ function renderProg() {
       <td data-l="Punto de encuentro"><input type="text" list="dlEncuentro" data-campo="encuentro" data-k="${d.k}" value="${esc(r.encuentro)}" placeholder="Lugar"></td>
       ${cap}
       <td data-l="Territorio" class="terr">
-        <div class="chips">${r.mz.length ? r.mz.map(id => `<span class="chip ${hecho ? 'ya' : ''}">${esc(id)}${hecho ? '' : `<button data-quitarprog="${t}|${d.k}|${esc(id)}" aria-label="Quitar">×</button>`}</span>`).join('') : '<span class="hint">Sin manzanas asignadas</span>'}</div>
+        <div class="chips">${r.publica ? `<span class="chip pub">📢 Predicación pública<button data-pubprog="${t}|${d.k}" aria-label="Quitar">×</button></span>` : ''}${r.mz.map(id => `<span class="chip ${hecho ? 'ya' : ''}">${esc(id)}${hecho ? '' : `<button data-quitarprog="${t}|${d.k}|${esc(id)}" aria-label="Quitar">×</button>`}</span>`).join('')}${!r.mz.length && !r.publica ? '<span class="hint">Sin territorio asignado</span>' : ''}</div>
         <div class="acts">
-          ${hecho ? `<span class="ok">✓ Registradas como visitadas</span>` : `<button class="btn sm" data-asigprog="${t}|${d.k}">📍 Asignar en mapa</button>
+          ${r.publica ? '' : `<button class="btn sm" data-pubprog="${t}|${d.k}" title="Agregar Predicación pública a este día">📢 Predicación pública</button>`}
+          ${hecho ? `<span class="ok">✓ Manzanas registradas como visitadas</span>` : `<button class="btn sm" data-asigprog="${t}|${d.k}">📍 Asignar en mapa</button>
           <button class="btn sm" data-visprog="${t}|${d.k}" ${r.mz.length ? '' : 'disabled'}>✓ Visitadas</button>
           <button class="btn sm dan" data-novisprog="${t}|${d.k}" ${r.mz.length ? '' : 'disabled'}>✗ No visitadas</button>`}
         </div>
@@ -638,6 +639,7 @@ function initProg() {
   hoja.addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.quitarprog) { const [t, k, id] = b.dataset.quitarprog.split('|'); const r = filaDe(t, k); r.mz = r.mz.filter(x => x !== id); guardarProg(); renderProg(); pintarBordes(); return; }
+    if (b.dataset.pubprog) { const [t, k] = b.dataset.pubprog.split('|'); const r = filaDe(t, k); r.publica = !r.publica; guardarProg(); renderProg(); return; }
     if (b.dataset.asigprog) { const [t, k] = b.dataset.asigprog.split('|'); ir('mapa'); setAsignar({ tipo: t, k }); return; }
     if (b.dataset.visprog) {
       const [t, k] = b.dataset.visprog.split('|'), r = filaDe(t, k), d = filaDef(t, k), f = fechaFila(t, k);
@@ -727,7 +729,7 @@ async function construirPDF(tipo) {
     const row = [{ content: dia, styles: { fontStyle: 'bold' } }, r.encuentro || ''];
     if (tipo === 'semanal') row.push(r.capitan || '');
     else if (i === 0) row.push({ content: pr.capitan || '', rowSpan: 3, styles: { valign: 'middle', halign: 'center' } });
-    row.push(r.mz.join(', '));
+    row.push([r.publica ? 'Predicación pública' : '', r.mz.join(', ')].filter(Boolean).join('\n'));
     return row;
   });
   doc.autoTable({
@@ -768,7 +770,7 @@ async function construirPDF(tipo) {
 }
 
 async function enviarPDF(tipo, modo) {
-  const sinMz = PROG[tipo].filas.every(d => !filaDe(tipo, d.k).mz.length);
+  const sinMz = PROG[tipo].filas.every(d => !filaDe(tipo, d.k).mz.length && !filaDe(tipo, d.k).publica);
   if (sinMz && !confirm('No hay territorios asignados. ¿Generar el PDF de todos modos?')) return;
   let doc;
   try { doc = await construirPDF(tipo); } catch (e) { toast(e.message, 5000); return; }
