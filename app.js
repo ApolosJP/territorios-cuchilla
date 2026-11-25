@@ -713,7 +713,7 @@ function mapaCanvas(tipo, ids) {
   (asig.size ? [...asig.keys()] : MZ.map(m => m.id)).forEach(id => pts.push(...MZ_BY_ID[id].ring));
   let x0 = Math.min(...pts.map(p => p[0])), x1 = Math.max(...pts.map(p => p[0])), y0 = Math.min(...pts.map(p => p[1])), y1 = Math.max(...pts.map(p => p[1]));
   const pad = Math.max(40, 0.12 * Math.max(x1 - x0, y1 - y0)); x0 -= pad; x1 += pad; y0 -= pad; y1 += pad;
-  const W = 1800, Hmax = 1500; let s = W / (x1 - x0); let H = (y1 - y0) * s;
+  const W = 1500, Hmax = 1250; let s = W / (x1 - x0); let H = (y1 - y0) * s;
   if (H > Hmax) { s = Hmax / (y1 - y0); H = Hmax; }
   const ox = (W - (x1 - x0) * s) / 2;
   const cv = document.createElement('canvas'); cv.width = W; cv.height = Math.round(H);
@@ -750,13 +750,13 @@ function mapaCanvas(tipo, ids) {
     g.beginPath(); g.roundRect ? g.roundRect(x - tw / 2, y - hh / 2, tw, hh, hh / 2) : g.rect(x - tw / 2, y - hh / 2, tw, hh); g.fill(); g.stroke();
     g.fillStyle = col; g.fillText(n.codigo, x, y + 1);
   });
-  return { url: cv.toDataURL('image/png'), w: W, h: H };
+  return { url: cv.toDataURL('image/jpeg', 0.82), w: W, h: H }; // JPEG: el PDF pesa mucho menos que con PNG
 }
 
 async function construirPDF(tipo) {
   if (!window.jspdf) throw new Error('No se pudo cargar el generador de PDF (revisa tu conexión).');
   const { jsPDF } = window.jspdf, cfg = PROG[tipo], pr = P[tipo];
-  const doc = new jsPDF({ unit: 'mm', format: 'letter' }), W = doc.internal.pageSize.getWidth(), M = 14;
+  const doc = new jsPDF({ unit: 'mm', format: 'letter', compress: true }), W = doc.internal.pageSize.getWidth(), M = 14;
   // ---- Hoja 1: formato
   doc.setFont('helvetica', 'bold'); doc.setFontSize(20); doc.text(cfg.titulo, W / 2, 22, { align: 'center' });
   doc.setFont('helvetica', 'normal'); doc.setFontSize(12); doc.text(subtituloProg(tipo), W / 2, 30, { align: 'center' });
@@ -804,7 +804,7 @@ async function construirPDF(tipo) {
     const cap = tipo === 'semanal' ? r.capitan : pr.capitan;
     doc.text([r.encuentro && 'Punto de encuentro: ' + r.encuentro, cap && 'Capitán: ' + cap].filter(Boolean).join('   ·   ') || ' ', M + 6, 29); doc.setTextColor(0);
     const img = mapaCanvas(tipo, r.mz), iw = W - 2 * M, ih = Math.min(120, iw * img.h / img.w), iw2 = ih * img.w / img.h;
-    doc.addImage(img.url, 'PNG', M + (iw - iw2) / 2, 33, iw2, ih); doc.setDrawColor(180); doc.rect(M + (iw - iw2) / 2, 33, iw2, ih);
+    doc.addImage(img.url, 'JPEG', M + (iw - iw2) / 2, 33, iw2, ih, undefined, 'FAST'); doc.setDrawColor(180); doc.rect(M + (iw - iw2) / 2, 33, iw2, ih);
     let y = 33 + ih + 8;
     const ns = notasDe(r.mz), casas = ns.filter(n => n.tipo === 'casa'), notas = ns.filter(n => n.tipo === 'nota');
     const tabla = (titulo, head, rows, widths) => {
